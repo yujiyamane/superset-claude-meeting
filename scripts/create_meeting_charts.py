@@ -2,7 +2,7 @@ import sys
 import os
 import json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from scripts.superset_client import api_get, api_post
+from scripts.superset_client import api_get, api_post, api_put, api_delete
 
 HEALTHCARE_DB_URI = "postgresql+psycopg2://superset:superset@postgres:5432/healthcare_db"
 TABLE_NAME = "meeting_bookings"
@@ -72,6 +72,53 @@ def make_chart(name, viz_type, ds_id, params):
     return cid
 
 
+def make_or_update_chart(name, viz_type, ds_id, params, query_context=None):
+    existing = chart_exists(name)
+    payload = {
+        "slice_name": name,
+        "viz_type": viz_type,
+        "datasource_id": ds_id,
+        "datasource_type": "table",
+        "params": json.dumps(params),
+    }
+    if query_context is not None:
+        ctx = dict(query_context)
+        ctx["datasource"] = {"id": ds_id, "type": "table"}
+        payload["query_context"] = json.dumps(ctx)
+    if existing:
+        api_put(f"/api/v1/chart/{existing}", payload)
+        print(f"  Updated: {name} id={existing}")
+        return existing
+    result = api_post("/api/v1/chart/", payload)
+    cid = result["id"]
+    print(f"  Created: {name} id={cid}")
+    return cid
+
+
+_COLUMN_PUT_FIELDS = {
+    "column_name", "type", "expression", "verbose_name", "description",
+    "is_dttm", "is_active", "groupby", "filterable", "python_date_format",
+    "extra", "advanced_data_type",
+}
+
+
+def _sanitize_column(col):
+    return {k: v for k, v in col.items() if k in _COLUMN_PUT_FIELDS}
+
+
+def remove_sort_calculated_columns(ds_id):
+    ds_detail = api_get(f"/api/v1/dataset/{ds_id}")
+    columns = ds_detail["result"]["columns"]
+    sort_cols = {"day_sorted", "hour_sorted"}
+    filtered = [_sanitize_column(c) for c in columns if c["column_name"] not in sort_cols]
+    removed = len(columns) - len(filtered)
+    if removed == 0:
+        print(f"  No sort columns to remove in dataset {ds_id}")
+        return
+    api_put(f"/api/v1/dataset/{ds_id}?override_columns=true", {"columns": filtered})
+    print(f"  Removed {removed} sort calculated column(s) from dataset {ds_id}")
+
+
 def count_metric(label="COUNT(*)"):
     return {"expressionType": "SQL", "sqlExpression": "COUNT(*)", "label": label}
 
@@ -85,6 +132,9 @@ def main():
     db_id = get_or_create_database()
     ds_id = get_or_create_dataset(db_id)
     print(f"  db_id={db_id}, ds_id={ds_id}")
+
+    print("\nRemoving sort calculated columns from dataset...")
+    remove_sort_calculated_columns(ds_id)
 
     print("\nCreating 13 Meeting charts...")
 
@@ -188,14 +238,40 @@ def main():
         },
     )
 
-    ids["heatmap"] = make_chart(
+    heatmap_query_context = {
+        "force": False,
+        "queries": [{
+            "filters": [{"col": "start_datetime", "op": "TEMPORAL_RANGE", "val": "No filter"}],
+            "extras": {"having": "", "where": ""},
+            "applied_time_extras": {},
+            "columns": [
+                {"columnType": "BASE_AXIS", "sqlExpression": "day_of_week",
+                 "label": "day_of_week", "expressionType": "SQL"},
+                "hour_ampm",
+                "day_of_week_number",
+                "hour_of_day",
+            ],
+            "metrics": [count_metric()],
+            "orderby": [["day_of_week_number", True], ["hour_of_day", True]],
+            "annotation_layers": [],
+            "row_limit": 10000,
+            "series_limit": 0,
+            "order_desc": True,
+            "url_params": {},
+            "custom_params": {},
+            "custom_form_data": {},
+        }],
+        "result_format": "json",
+        "result_type": "full",
+    }
+    ids["heatmap"] = make_or_update_chart(
         "Meeting: Booking Heat Map (Peak Times)",
         "heatmap_v2",
         ds_id,
         {
+            "x_axis": "day_of_week",
+            "groupby": ["hour_ampm"],
             "metric": count_metric(),
-            "all_columns_x": "day_of_week",
-            "all_columns_y": "hour_ampm",
             "linear_color_scheme": "blue_white_yellow",
             "xscale_interval": 1,
             "yscale_interval": 1,
@@ -203,6 +279,7 @@ def main():
             "bottom_margin": "auto",
             "normalize_across": "heatmap",
         },
+        query_context=heatmap_query_context,
     )
 
     ids["bar_floor"] = make_chart(

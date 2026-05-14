@@ -48,3 +48,11 @@ def api_put(path, payload):
     if r.status_code not in (200, 201):
         raise RuntimeError(f"PUT {path} failed {r.status_code}: {r.text[:300]}")
     return r.json()
+
+
+def api_delete(path):
+    s = get_session()
+    r = s.delete(f"{BASE_URL}{path}")
+    if r.status_code not in (200, 204):
+        raise RuntimeError(f"DELETE {path} failed {r.status_code}: {r.text[:300]}")
+    return {}
